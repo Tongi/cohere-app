@@ -6,7 +6,7 @@ from PyQt5.QtGui import QColor, QPalette, QIcon, QKeySequence
 import cohere
 
 # Initialize the client with your API key
-client = cohere.Client("cohereapi")
+client = cohere.Client("your_api_key_here")
 
 def get_chatbot_response(question, options):
     formatted_options = "\n".join([f"Option {i+1}: {option}" for i, option in enumerate(options)])
