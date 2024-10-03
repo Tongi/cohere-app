@@ -1,0 +1,281 @@
+import sys
+import pyttsx3
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLineEdit, QPushButton, QTextEdit, QLabel, QSystemTrayIcon, QMenu, QAction, QShortcut
+from PyQt5.QtCore import Qt, QTimer, QPoint
+from PyQt5.QtGui import QColor, QPalette, QIcon, QKeySequence
+import cohere
+
+# Initialize the client with your API key
+client = cohere.Client("cohereapi")
+
+def get_chatbot_response(question, options):
+    formatted_options = "\n".join([f"Option {i+1}: {option}" for i, option in enumerate(options)])
+    formatted_message = f"{question}\n\n{formatted_options}"
+    
+    response = client.chat(
+        message=formatted_message,
+        model="command-r-plus",
+        preamble=( 
+            "You are an expert with years of experience in network protocols. "
+            "Given the following question and options, choose the correct answer. "
+            "Respond with the option number (e.g., 'Option 1') for the correct answer."
+        ),
+        chat_history=[ 
+            {"role": "USER", "message": formatted_message}
+        ] 
+    )
+    
+    response_text = response.text
+    return response_text
+
+class AutoFocusWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Soundback")
+        self.setGeometry(1, 1, 1, 1)
+
+        # Set window to not appear in the taskbar
+        self.setWindowFlags(Qt.SubWindow | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        
+        # Variables for movement
+        self.is_moving = False
+        self.start_move_position = QPoint(0, 0)
+
+        # Set up the system tray icon
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(QIcon("icon.png"))  # Replace with your icon path
+        self.tray_icon.setVisible(True)
+        
+        # Add a context menu to the tray icon
+        tray_menu = QMenu()
+        restore_action = QAction("Restore", self)
+        restore_action.triggered.connect(self.show)  # Show window when clicked
+        tray_menu.addAction(restore_action)
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        tray_menu.addAction(quit_action)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+
+        # Set up layout
+        layout = QVBoxLayout()
+
+        # Question input (invisible)
+        self.question_label = QLabel("Enter your question:")
+        layout.addWidget(self.question_label)
+        self.question_entry = QLineEdit()
+        self.question_label.setVisible(False)
+        self.question_entry.setVisible(False)
+        layout.addWidget(self.question_entry)
+
+        # Options input (invisible)
+        self.option_labels = []
+        self.option_entries = []
+        for i in range(6):  # Now set for 6 options
+            label = QLabel(f"Enter option {i+1}:")
+            entry = QLineEdit()
+            label.setVisible(False)
+            entry.setVisible(False)
+            layout.addWidget(label)
+            layout.addWidget(entry)
+            self.option_labels.append(label)
+            self.option_entries.append(entry)
+
+        # Submit button
+        self.submit_button = QPushButton("Submit")
+        self.submit_button.clicked.connect(self.on_submit)
+        layout.addWidget(self.submit_button)
+
+        # Reset button
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self.reset_fields)
+        layout.addWidget(self.reset_button)
+
+        # Response text area (invisible)
+        self.response_text_area = QTextEdit()
+        self.response_text_area.setReadOnly(True)
+        self.response_text_area.setVisible(False)
+        layout.addWidget(self.response_text_area)
+
+        # Apply layout
+        self.setLayout(layout)
+
+        # Set background color to solid (e.g., light gray)
+        palette = self.palette()
+        palette.setColor(QPalette.Background, QColor(230, 230, 230, 127))  # Light gray with 50% transparency
+
+        self.setPalette(palette)
+
+        # Initialize clipboard and timer
+        self.clipboard = QApplication.clipboard()
+        self.previous_clipboard_text = ""
+        self.current_index = 0
+        self.clipboard_timer = QTimer()
+        self.clipboard_timer.timeout.connect(self.check_clipboard)
+        self.clipboard_timer.start(1000)  # Check every second
+
+        # Initialize text-to-speech engine
+        self.tts_engine = pyttsx3.init()
+
+        # Create shortcuts for submit (V) and reset (Z)
+        self.submit_shortcut = QShortcut(QKeySequence("V"), self)
+        self.submit_shortcut.activated.connect(self.on_submit)
+
+        self.reset_shortcut = QShortcut(QKeySequence("Z"), self)
+        self.reset_shortcut.activated.connect(self.reset_fields)
+
+        # Create timers for submit and reset actions
+        self.submit_timer = QTimer()
+        self.submit_timer.setSingleShot(True)
+        self.submit_timer.timeout.connect(self.auto_submit)
+
+        self.reset_timer = QTimer()
+        self.reset_timer.setSingleShot(True)
+        self.reset_timer.timeout.connect(self.auto_reset)
+
+        # Timer for debugging remaining time
+        self.debug_timer = QTimer()
+        self.debug_timer.timeout.connect(self.debug_timers)
+        self.debug_timer.start(1000)  # Check every second
+
+        # State variable to track whether waiting for reset
+        self.waiting_for_reset = False
+
+        print("Application initialized successfully.")
+
+        # Hide the entire window initially
+        self.hide_gui_elements()
+
+        # Start the timer sequence
+        self.start_timers()
+
+    def start_timers(self):
+        """Start the timers for submit and reset actions."""
+        if not self.waiting_for_reset:
+            self.submit_timer.start(20000)  # 20 seconds for submit
+            print("Submit timer started.")
+            self.waiting_for_reset = True
+
+    def debug_timers(self):
+        """Print remaining time for the submit and reset timers."""
+        if self.submit_timer.isActive():
+            remaining_submit_time = self.submit_timer.remainingTime()
+            print(f"Time left for auto-submit: {remaining_submit_time / 1000:.1f} seconds")
+        
+        if self.reset_timer.isActive():
+            remaining_reset_time = self.reset_timer.remainingTime()
+            print(f"Time left for auto-reset: {remaining_reset_time / 1000:.1f} seconds")
+
+    def hide_gui_elements(self):
+        """Hides all elements except the submit and reset buttons."""
+        self.question_label.setVisible(False)
+        self.question_entry.setVisible(False)
+        for label in self.option_labels:
+            label.setVisible(False)
+        for entry in self.option_entries:
+            entry.setVisible(False)
+        self.response_text_area.setVisible(False)
+
+    def show_gui_elements(self):
+        """Shows all elements."""
+        self.question_label.setVisible(True)
+        self.question_entry.setVisible(True)
+        for label in self.option_labels:
+            label.setVisible(True)
+        for entry in self.option_entries:
+            entry.setVisible(True)
+        self.response_text_area.setVisible(True)
+
+    def enterEvent(self, event):
+        """Show GUI elements when the mouse hovers over the window."""
+        self.show_gui_elements()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        """Hide GUI elements when the mouse leaves the window."""
+        self.hide_gui_elements()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        """Enable window movement on mouse press."""
+        if event.button() == Qt.LeftButton:
+            self.is_moving = True
+            self.start_move_position = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        """Move the window while dragging."""
+        if self.is_moving:
+            self.move(event.globalPos() - self.start_move_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        """Stop window movement on mouse release."""
+        if event.button() == Qt.LeftButton:
+            self.is_moving = False
+            event.accept()
+
+    def check_clipboard(self):
+        current_text = self.clipboard.text()
+        if current_text != self.previous_clipboard_text:
+            self.previous_clipboard_text = current_text
+            self.populate_current_input(current_text)
+            print(f"Clipboard updated: {current_text}")
+
+    def populate_current_input(self, text):
+        if self.current_index == 0:
+            self.question_entry.setText(text)
+            self.current_index = 1
+            self.speak("I am on question")
+            print(f"Question set to: {text}")
+        elif 1 <= self.current_index <= len(self.option_entries):
+            if self.current_index - 1 < len(self.option_entries):
+                self.option_entries[self.current_index - 1].setText(text)
+                self.speak(str(self.current_index))
+                print(f"Option {self.current_index} set to: {text}")
+            self.current_index += 1
+
+    def speak(self, text):
+        """Speaks the given text."""
+        self.tts_engine.say(text)
+        self.tts_engine.runAndWait()
+
+    def reset_fields(self):
+        self.question_entry.clear()
+        for entry in self.option_entries:
+            entry.clear()
+        self.current_index = 0
+        print("Fields reset.")
+        self.speak("Reset")
+        self.waiting_for_reset = False  # Reset the waiting state after reset
+        self.start_timers()  # Restart timers after reset
+
+    def auto_submit(self):
+        """Automatically clicks the submit button after 20 seconds."""
+        self.on_submit()
+        print("Auto-submit triggered.")
+
+    def auto_reset(self):
+        """Automatically clicks the reset button after 5 seconds."""
+        self.reset_fields()
+        print("Auto-reset triggered.")
+
+    def on_submit(self):
+        question = self.question_entry.text()
+        options = [entry.text() for entry in self.option_entries]
+        response_text = get_chatbot_response(question, options)
+        self.response_text_area.setText(response_text)
+        self.speak(response_text)
+        print(f"Submitted question: {question}")
+        print(f"Options: {options}")
+        print(f"Chatbot response: {response_text}")
+        self.submit_timer.stop()  # Stop the submit timer
+        self.reset_timer.start(7000)  # 7 seconds for reset
+        print("Reset timer started.")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = AutoFocusWindow()
+    window.show()
+    sys.exit(app.exec_())
